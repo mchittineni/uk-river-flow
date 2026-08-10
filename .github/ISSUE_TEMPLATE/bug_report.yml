@@ -1,0 +1,45 @@
+name: Bug report
+description: Something is wrong with the map or the pipeline
+labels: [bug]
+body:
+  - type: dropdown
+    id: area
+    attributes:
+      label: Where is it?
+      options:
+        - The map (front end)
+        - The data pipeline
+        - A specific station's data looks wrong
+        - CI / deployment
+        - Documentation
+    validations:
+      required: true
+
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened, and what did you expect?
+    validations:
+      required: true
+
+  - type: textarea
+    id: repro
+    attributes:
+      label: How can we reproduce it?
+      placeholder: |
+        1. Open the map
+        2. Switch to the live layer
+        3. ...
+    validations:
+      required: true
+
+  - type: input
+    id: generated
+    attributes:
+      label: Data version
+      description: The `generated_at` value from data/v1/meta.json, or the footer's "Updated" time.
+
+  - type: input
+    id: env
+    attributes:
+      label: Browser / OS, or Python version for pipeline issues

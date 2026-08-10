@@ -1,0 +1,35 @@
+name: Data quality
+description: A station or river looks wrong on the map
+labels: [data]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Before filing: this project only reshapes upstream open data — it does not
+        measure or model anything itself. If a value is wrong at the source, the fix
+        belongs upstream, and it is worth checking the source directly first. The
+        station panel links to the API this repo read it from.
+
+        What *is* a bug here: a value we mangled in transit, a station in the wrong
+        place, a colour that misrepresents the reading, or a gap we should have shown
+        as a gap.
+
+  - type: input
+    id: station
+    attributes:
+      label: Station name or id
+    validations:
+      required: true
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: What looks wrong?
+      placeholder: Shows 0.4 m3/s but the source API reports 41 m3/s for the same day.
+    validations:
+      required: true
+
+  - type: input
+    id: upstream
+    attributes:
+      label: Link to the upstream value, if you checked

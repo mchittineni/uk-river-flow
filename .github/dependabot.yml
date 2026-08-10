@@ -1,0 +1,22 @@
+version: 2
+updates:
+  # The front end is the only place with third-party dependencies. The Python
+  # pipeline is standard-library only by design, and CI enforces that, so there is
+  # nothing for Dependabot to watch there.
+  - package-ecosystem: npm
+    directory: /web
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    groups:
+      # One PR for the routine dev-tooling churn; runtime deps stay individual so a
+      # MapLibre bump gets looked at on its own.
+      dev-tooling:
+        patterns: ["eslint*", "prettier", "vite", "@eslint/*"]
+        update-types: ["minor", "patch"]
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly

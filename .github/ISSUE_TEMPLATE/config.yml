@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Environment Agency data quality
+    url: https://environment.data.gov.uk/
+    about: If a reading is wrong at the source, it needs reporting there, not here.
+  - name: OpenStreetMap river geometry
+    url: https://www.openstreetmap.org/
+    about: River lines come from OSM. Anyone can fix them there, and the next quarterly rebuild picks it up.

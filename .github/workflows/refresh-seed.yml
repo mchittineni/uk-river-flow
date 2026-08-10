@@ -1,0 +1,94 @@
+name: Refresh committed seed bundle
+
+# The deployed site regenerates its data on a schedule and never commits it (see
+# refresh-and-deploy.yml). But a fresh clone still needs *something* in data/v1 or
+# `npm run dev` shows an error page, and CI needs a fixture to validate.
+#
+# So once a month this refreshes the committed bundle and opens a pull request.
+# A PR rather than a direct push, for three reasons: `main` stays protectable, the
+# diff is reviewable before it becomes the fixture every CI run depends on, and a
+# monthly cadence keeps git history growth to roughly 5 MB a year instead of the
+# hundreds of megabytes a per-run commit would produce.
+#
+# The reference percentiles are recomputed here too, since this is the slow job.
+#
+# Security note: no attacker-controllable event data reaches a shell. The only
+# expressions are two workflow_dispatch numbers, passed via `env` and quoted; the
+# PR body comes from a file written by our own tooling.
+
+on:
+  schedule:
+    - cron: "40 3 1 * *" # 03:40 UTC on the 1st
+  workflow_dispatch:
+    inputs:
+      days:
+        description: "Days of history to seed"
+        type: number
+        default: 30
+      reference_days:
+        description: "Days of history for the percentile reference"
+        type: number
+        default: 365
+
+concurrency:
+  group: refresh-seed
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  seed:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Regenerate bundle and percentile reference
+        env:
+          DAYS: ${{ inputs.days || 30 }}
+          REFERENCE_DAYS: ${{ inputs.reference_days || 365 }}
+        run: |
+          set -euo pipefail
+          python3 pipeline/ingest_uk.py \
+            --days "$DAYS" \
+            --reference --reference-days "$REFERENCE_DAYS" \
+            --out data/v1
+
+      - name: Validate
+        run: python3 pipeline/validate_data.py --root data/v1 | tee /tmp/validation.txt
+
+      - name: Compose the pull request body
+        run: |
+          set -euo pipefail
+          {
+            echo "Automated monthly refresh of the committed seed bundle."
+            echo
+            echo "This bundle is the fixture CI validates against, and what a fresh"
+            echo "clone renders before anyone runs the ingest locally. The deployed"
+            echo "site does not read it - that regenerates its own data each schedule."
+            echo
+            echo '```'
+            cat /tmp/validation.txt
+            echo '```'
+          } > /tmp/pr-body.md
+
+      - uses: peter-evans/create-pull-request@v7
+        with:
+          branch: automation/refresh-seed
+          delete-branch: true
+          title: "chore(data): refresh committed seed bundle"
+          body-path: /tmp/pr-body.md
+          commit-message: "chore(data): refresh committed seed bundle"
+          labels: |
+            data
+            automated
+          add-paths: |
+            data/v1/**

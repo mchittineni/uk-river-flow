@@ -1,0 +1,116 @@
+name: Rebuild river geometry
+
+# River centrelines change on a scale of years, so this is the slowest and rarest
+# job in the repo: it tiles the whole country across the public Overpass mirrors,
+# which takes an hour or two of mostly waiting. It runs quarterly and on demand,
+# never on a push.
+#
+# Two things make that acceptable rather than reckless:
+#   * The tile cache is persisted between runs, so a failure resumes instead of
+#     re-asking three volunteer-run servers for work they already did.
+#   * The result is committed via a pull request, so the geometry ships with the
+#     repo. A fork never has to run Overpass at all - which matters, because these
+#     mirrors return 429 and 502 often enough that requiring them for a first-time
+#     setup would be a poor experience.
+#
+# Security note: the interpolated values are two workflow_dispatch inputs, passed
+# through `env` and always quoted at the point of use. `workflow_dispatch` is
+# restricted to users with write access, and both values are parsed as numbers by
+# argparse, so a non-numeric value fails the script rather than reaching a shell.
+
+on:
+  schedule:
+    - cron: "0 2 5 1,4,7,10 *" # 02:00 UTC, 5th of Jan/Apr/Jul/Oct
+  workflow_dispatch:
+    inputs:
+      min_length_km:
+        description: "Drop river ways shorter than this"
+        type: number
+        default: 4
+      tolerance_deg:
+        description: "Simplification tolerance in degrees (0.0008 is about 90 m)"
+        type: choice
+        default: "0.0008"
+        options:
+          - "0.0003"
+          - "0.0008"
+          - "0.0015"
+          - "0.003"
+
+concurrency:
+  group: refresh-network
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  geometry:
+    runs-on: ubuntu-latest
+    # Overpass is slow and rate-limited; the job spends most of its life waiting.
+    # Well under the 6 h ceiling for a public repo, but generous enough to finish.
+    timeout-minutes: 300
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Restore the Overpass tile cache
+        uses: actions/cache@v4
+        with:
+          path: .cache/overpass
+          # A run-scoped key so each scheduled run starts fresh, while a retry
+          # restores the most recent partial cache and resumes from it.
+          key: overpass-${{ github.run_id }}
+          restore-keys: |
+            overpass-
+
+      - name: Fetch and simplify river centrelines
+        env:
+          MIN_LENGTH_KM: ${{ inputs.min_length_km || 4 }}
+          TOLERANCE_DEG: ${{ inputs.tolerance_deg || '0.0008' }}
+        run: |
+          set -euo pipefail
+          python3 pipeline/build_network.py \
+            --out data/v1/network.geojson \
+            --min-length-km "$MIN_LENGTH_KM" \
+            --tolerance "$TOLERANCE_DEG" \
+            --cache-dir .cache/overpass
+
+      - name: Validate
+        run: python3 pipeline/validate_data.py --root data/v1 | tee /tmp/validation.txt
+
+      - name: Compose the pull request body
+        run: |
+          set -euo pipefail
+          {
+            echo "Automated quarterly rebuild of the river-centreline layer from"
+            echo "OpenStreetMap via Overpass."
+            echo
+            echo "Geometry is committed rather than fetched at deploy time so that a"
+            echo "fork never depends on the public Overpass mirrors being healthy."
+            echo
+            echo "River centrelines are (c) OpenStreetMap contributors, ODbL 1.0."
+            echo
+            echo '```'
+            cat /tmp/validation.txt
+            echo '```'
+          } > /tmp/pr-body.md
+
+      - uses: peter-evans/create-pull-request@v7
+        with:
+          branch: automation/refresh-network
+          delete-branch: true
+          title: "chore(data): rebuild river centrelines from OpenStreetMap"
+          body-path: /tmp/pr-body.md
+          commit-message: "chore(data): rebuild river centrelines from OpenStreetMap"
+          labels: |
+            data
+            automated
+          add-paths: |
+            data/v1/network.geojson

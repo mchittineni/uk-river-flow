@@ -1,0 +1,144 @@
+name: Refresh data and deploy
+
+# The whole "backend" of this project.
+#
+# Design decision (docs/adr/0005): refreshed data is *not* committed. It is
+# generated in the job, validated, built into the site and published straight to
+# GitHub Pages as a deployment artifact. Committing a ~450 KB bundle several times
+# a day would add hundreds of megabytes of git objects a year, for data that is
+# already reproducible from a free public API in about a minute.
+#
+# What *is* committed is a periodically refreshed seed bundle (refresh-seed.yml),
+# so a fresh clone works offline and out of the box.
+#
+# Cadence: the Environment Agency archive layer is daily mean discharge, so
+# refreshing more than a few times a day buys nothing. Three runs a day keeps the
+# live 15-minute layer reasonably current while staying a negligible load on a free
+# public service.
+#
+# Security note: no step interpolates attacker-controllable event data into a
+# shell. The only inputs are a number and a boolean from workflow_dispatch, and
+# both reach the shell through `env` as quoted variables.
+
+on:
+  schedule:
+    # 05:20, 11:20 and 17:20 UTC. Offset from the hour because everyone's cron
+    # fires on the hour and shared runners queue behind it.
+    - cron: "20 5,11,17 * * *"
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      days:
+        description: "Days of history in the published window"
+        type: number
+        default: 30
+      refresh_reference:
+        description: "Also recompute the long-run percentile reference (slow)"
+        type: boolean
+        default: false
+
+# One deployment at a time. Without this, overlapping runs race on the Pages
+# deployment and the loser fails noisily for no reason.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Ingest, validate, build
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Fetch Environment Agency data
+        env:
+          DAYS: ${{ inputs.days || 30 }}
+          REFRESH_REFERENCE: ${{ inputs.refresh_reference || false }}
+        run: |
+          set -euo pipefail
+          args=(--days "$DAYS" --out data/v1)
+          if [ "$REFRESH_REFERENCE" = "true" ]; then
+            args+=(--reference)
+          fi
+          python3 pipeline/ingest_uk.py "${args[@]}"
+
+      - name: Validate against the published contract
+        # Runs *before* the build. A bundle that violates the contract must never
+        # reach the deployed site, because the front end can only answer it with an
+        # error page - and a stale-but-valid site beats a broken fresh one.
+        run: python3 pipeline/validate_data.py --root data/v1
+
+      - name: Guard against a collapse in station count
+        # An upstream schema change or a partial outage can produce a technically
+        # valid bundle that covers a fraction of the network. The contract cannot
+        # catch that - 20 stations is as valid as 1,000 - so this compares the fresh
+        # bundle against the committed one, which the ingest overwrote in place.
+        run: |
+          set -euo pipefail
+          if ! git show "HEAD:data/v1/stations.json" > /tmp/committed-stations.json 2>/dev/null; then
+            echo "::notice::no committed bundle to compare against - treating this as a bootstrap run"
+            exit 0
+          fi
+          python3 - <<'EOF'
+          import json, pathlib, sys
+
+          fresh = json.loads(pathlib.Path("data/v1/stations.json").read_text())
+          known = json.loads(pathlib.Path("/tmp/committed-stations.json").read_text())
+          floor = int(len(known) * 0.7)
+          print(f"fresh={len(fresh)} committed={len(known)} floor={floor}")
+          if len(fresh) < floor:
+              print(f"::error::only {len(fresh)} stations, under 70% of the committed {len(known)}")
+              sys.exit(1)
+          EOF
+
+      - name: Summarise
+        run: |
+          set -euo pipefail
+          {
+            echo "### Data refresh"
+            echo ""
+            echo '```'
+            python3 pipeline/validate_data.py --root data/v1
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - run: npm ci
+        working-directory: web
+
+      - run: npm run build
+        working-directory: web
+
+      - uses: actions/configure-pages@v5
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: web/dist
+
+  deploy:
+    name: Deploy to Pages
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - id: deploy
+        uses: actions/deploy-pages@v4

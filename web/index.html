@@ -1,0 +1,164 @@
+<!doctype html>
+<html lang="en-GB">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <title>River Flow UK — live discharge across Britain's rivers</title>
+    <meta
+      name="description"
+      content="An interactive map of river discharge across the United Kingdom, built from Environment Agency open data. Free, open source, no API keys."
+    />
+    <meta name="color-scheme" content="dark light" />
+    <meta name="theme-color" content="#0a1119" />
+
+    <meta property="og:title" content="River Flow UK" />
+    <meta
+      property="og:description"
+      content="Live river discharge across Britain, from Environment Agency open data."
+    />
+    <meta property="og:type" content="website" />
+
+    <link
+      rel="icon"
+      href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ctext y='26' font-size='26'%3E%F0%9F%8C%8A%3C/text%3E%3C/svg%3E"
+    />
+    <link rel="preconnect" href="https://tiles.openfreemap.org" crossorigin />
+    <link rel="modulepreload" href="./src/main.js" />
+  </head>
+
+  <body>
+    <div
+      id="map"
+      role="application"
+      aria-label="Map of river gauging stations across the United Kingdom"
+    ></div>
+
+    <noscript>
+      <div class="notice">
+        <h1>River Flow UK</h1>
+        <p>
+          This map renders with WebGL and needs JavaScript. The underlying data is plain JSON and stays usable
+          without it — see <code>data/v1/</code> in the repository, or the Environment Agency Hydrology API
+          directly.
+        </p>
+      </div>
+    </noscript>
+
+    <!-- Loading state is in the markup rather than injected, so it paints on
+         first frame instead of waiting for the module graph to evaluate. -->
+    <div id="boot" class="boot">
+      <div class="boot__spinner" aria-hidden="true"></div>
+      <p class="boot__text">Loading gauging stations…</p>
+    </div>
+
+    <header class="masthead">
+      <h1 class="masthead__title">River Flow <span>UK</span></h1>
+      <p class="masthead__subtitle" id="masthead-subtitle">Environment Agency open data</p>
+    </header>
+
+    <!-- Control rail -->
+    <section class="rail" aria-label="Map controls">
+      <div class="rail__group">
+        <label class="rail__label" for="layer-select">Layer</label>
+        <div class="segmented" role="radiogroup" aria-labelledby="layer-select" id="layer-select">
+          <button type="button" role="radio" aria-checked="true" data-layer="archive">
+            Daily<small>1,000+ gauges</small>
+          </button>
+          <button type="button" role="radio" aria-checked="false" data-layer="live">
+            Live<small>15-minute</small>
+          </button>
+        </div>
+      </div>
+
+      <div class="rail__group" id="time-group">
+        <label class="rail__label" for="time"> Date <output id="time-readout" for="time">—</output> </label>
+        <input type="range" id="time" min="0" max="0" step="1" value="0" aria-describedby="time-readout" />
+        <div class="rail__row">
+          <button
+            type="button"
+            id="play"
+            class="btn"
+            aria-pressed="false"
+            title="Animate through the window (space)"
+          >
+            <span class="btn__icon" aria-hidden="true">▶</span> Play
+          </button>
+          <button type="button" id="now" class="btn btn--ghost" title="Jump to the latest reading">
+            Latest
+          </button>
+        </div>
+      </div>
+
+      <div class="rail__group">
+        <label class="rail__label" for="flow-speed"
+          >Flow animation <output id="speed-readout">on</output></label
+        >
+        <input type="range" id="flow-speed" min="0" max="100" step="5" value="55" />
+      </div>
+
+      <div class="rail__group">
+        <label class="rail__label" for="min-flow">
+          Minimum discharge <output id="min-flow-readout">all</output>
+        </label>
+        <input type="range" id="min-flow" min="0" max="100" step="1" value="0" />
+      </div>
+
+      <div class="rail__group rail__group--toggles">
+        <label class="switch">
+          <input type="checkbox" id="toggle-rivers" checked />
+          <span>River network</span>
+        </label>
+        <label class="switch">
+          <input type="checkbox" id="toggle-terrain" />
+          <span>3D terrain</span>
+        </label>
+        <label class="switch">
+          <input type="checkbox" id="toggle-globe" />
+          <span>Globe view</span>
+        </label>
+        <label class="switch">
+          <input type="checkbox" id="toggle-labels" checked />
+          <span>Place labels</span>
+        </label>
+      </div>
+
+      <details class="rail__group legend">
+        <summary class="rail__label">Legend</summary>
+        <p class="legend__note">
+          Colour is each station's discharge against <em>its own</em> record, not an absolute scale — 20 m³/s
+          is a drought on the Thames and a flood on a chalk stream.
+        </p>
+        <ul class="legend__list">
+          <li><i data-state="very-low"></i> Exceptionally low <small>below 10th percentile</small></li>
+          <li><i data-state="low"></i> Below normal <small>10th–25th</small></li>
+          <li><i data-state="normal"></i> Normal <small>25th–75th</small></li>
+          <li><i data-state="high"></i> Above normal <small>75th–95th</small></li>
+          <li><i data-state="very-high"></i> Exceptionally high <small>above 95th percentile</small></li>
+        </ul>
+      </details>
+    </section>
+
+    <!-- Station detail, populated on selection -->
+    <aside class="detail" id="detail" hidden aria-live="polite">
+      <button type="button" class="detail__close" id="detail-close" aria-label="Close station detail">
+        ×
+      </button>
+      <div id="detail-body"></div>
+    </aside>
+
+    <footer class="credits">
+      <p id="credits-body">
+        <!-- Attribution is injected from meta.json rather than hardcoded: the OGL
+             and ODbL licences both require it, and generating it from the same
+             manifest the pipeline writes means it cannot drift out of date. -->
+      </p>
+      <p class="credits__links">
+        <a href="https://github.com/mchittineni/uk-river-flow" rel="noopener">Source</a>
+        <a href="./data/v1/meta.json">Data</a>
+        <a href="#" id="about-link">About</a>
+      </p>
+    </footer>
+
+    <script type="module" src="./src/main.js"></script>
+  </body>
+</html>

@@ -1,0 +1,26 @@
+# Node
+node_modules/
+web/dist/
+*.tsbuildinfo
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Pipeline scratch. Both are caches of third-party responses: safe to delete,
+# expensive to refetch, and never something to commit.
+.cache/
+
+# Editors and OS
+.DS_Store
+.idea/
+.vscode/*
+!.vscode/extensions.json
+*.swp
+
+# Local overrides
+.env
+.env.*
+!.env.example

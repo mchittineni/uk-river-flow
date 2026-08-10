@@ -1,21 +1,5 @@
 name: Refresh committed seed bundle
 
-# The deployed site regenerates its data on a schedule and never commits it (see
-# refresh-and-deploy.yml). But a fresh clone still needs *something* in data/v1 or
-# `npm run dev` shows an error page, and CI needs a fixture to validate.
-#
-# So once a month this refreshes the committed bundle and opens a pull request.
-# A PR rather than a direct push, for three reasons: `main` stays protectable, the
-# diff is reviewable before it becomes the fixture every CI run depends on, and a
-# monthly cadence keeps git history growth to roughly 5 MB a year instead of the
-# hundreds of megabytes a per-run commit would produce.
-#
-# The reference percentiles are recomputed here too, since this is the slow job.
-#
-# Security note: no attacker-controllable event data reaches a shell. The only
-# expressions are two workflow_dispatch numbers, passed via `env` and quoted; the
-# PR body comes from a file written by our own tooling.
-
 on:
   schedule:
     - cron: "40 3 1 * *" # 03:40 UTC on the 1st
@@ -44,10 +28,13 @@ jobs:
     permissions:
       contents: write
       pull-requests: write
-    steps:
-      - uses: actions/checkout@v4
 
-      - uses: actions/setup-python@v5
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 # zizmor: ignore[artipacked]
+
+      - name: Setup Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.13"
 
@@ -80,7 +67,9 @@ jobs:
             echo '```'
           } > /tmp/pr-body.md
 
-      - uses: peter-evans/create-pull-request@v7
+      
+      - name: Create the pull request
+        uses: peter-evans/create-pull-request@5f6978faf089d4d20b00c7766989d076bb2fc7f1 # v8.1.1
         with:
           branch: automation/refresh-seed
           delete-branch: true

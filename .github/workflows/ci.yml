@@ -1,22 +1,11 @@
 name: CI
 
-# Runs on every push and pull request. Deliberately does no network I/O: the
-# upstream APIs are free public services and a CI job that hits them on every
-# commit is both rude and flaky. Live fetching happens only in the scheduled
-# ingest, which runs once per source per schedule.
-#
-# Security note: no step interpolates attacker-controllable event data
-# (issue/PR titles, branch names, commit messages) into a shell. The only
-# expressions used are `github.ref` in the concurrency key and `matrix.python`.
-
 on:
   push:
     branches: [main]
   pull_request:
   workflow_dispatch:
 
-# Cancel superseded runs on the same ref. Free minutes are unlimited on public
-# repos, but a queue of stale runs still delays the one you care about.
 concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
@@ -31,20 +20,20 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # The floor is the oldest version the code's syntax supports; the ceiling
-        # catches deprecations before a runner image upgrade does it for us.
         python: ["3.11", "3.13"]
-    steps:
-      - uses: actions/checkout@v4
 
-      - uses: actions/setup-python@v5
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Setup Python ${{ matrix.python }}
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: ${{ matrix.python }}
 
       - name: Confirm the pipeline has no third-party dependencies
-        # A design property worth enforcing, not just documenting: the ingest must
-        # run on a bare interpreter so a fork years from now is never blocked by an
-        # unresolvable lockfile.
         run: |
           if [ -s pipeline/requirements.txt ]; then
             echo "::error::pipeline/requirements.txt is non-empty; the ingest is meant to be stdlib-only"
@@ -59,14 +48,9 @@ jobs:
         run: python3 -m unittest discover -s pipeline/tests -v
 
       - name: Validate the committed seed bundle
-        # `--allow-missing` covers the bootstrap case: a fresh fork has no seed until
-        # the first scheduled ingest opens its PR, and failing CI for that would block
-        # the very change that fixes it. Once a seed exists, this validates it strictly.
         run: python3 pipeline/validate_data.py --root data/v1 --allow-missing
 
       - name: Confirm validation does not mutate the bundle
-        # The scheduled ingest relies on identical data producing an identical file.
-        # If validation itself wrote anything, every run would churn a diff.
         run: |
           git diff --exit-code -- data/ || {
             echo "::error::validation mutated data/; it must be read-only"
@@ -76,36 +60,48 @@ jobs:
   web:
     name: Front end
     runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
 
-      - uses: actions/setup-node@v4
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          node-version: "22"
+          persist-credentials: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "24"
           cache: npm
           cache-dependency-path: web/package-lock.json
 
-      - run: npm ci
+      - name: Install Dependencies
+        run: npm install
+
+      - name: Update Dependencies
+        run: npm ci
         working-directory: web
 
-      - run: npm run format:check
+      - name: Check Code Formatting
+        run: npm run format:check
         working-directory: web
 
-      - run: npm run lint
+      - name: Lint Code
+        run: npm run lint
         working-directory: web
 
       - name: Unit tests
-        # Includes the parity check asserting the JS and Python implementations of
-        # `flowState` agree; duplicated logic is only safe if something watches it.
         run: npm test
         working-directory: web
 
-      - run: npm run build
+      - name: Build
+        run: npm run build
+        working-directory: web
+
+      - name: Verify Security Headers
+        run: npm run check:headers
         working-directory: web
 
       - name: Enforce the page-weight budget
-        # A map that takes ten seconds to paint is a broken map. Checked in CI so a
-        # dependency bump cannot quietly blow it.
         run: |
           BUDGET_KB=1200
           TOTAL=$(find web/dist/assets -type f \( -name '*.js' -o -name '*.css' \) -print0 \
@@ -117,7 +113,8 @@ jobs:
             exit 1
           fi
 
-      - uses: actions/upload-artifact@v4
+      - name: Upload Site Preview
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: site-preview
           path: web/dist

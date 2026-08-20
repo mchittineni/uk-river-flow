@@ -61,7 +61,7 @@ jobs:
           python-version: "3.13"
 
       - name: Restore the Overpass tile cache
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: .cache/overpass
           # A run-scoped key so each scheduled run starts fresh, while a retry

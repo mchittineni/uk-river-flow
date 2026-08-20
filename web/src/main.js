@@ -22,6 +22,7 @@ import {
   setTerrain,
 } from "./map.js";
 import {
+  renderAbout,
   renderCredits,
   renderFatal,
   renderLiveDetail,
@@ -40,6 +41,14 @@ const THEME_COLOURS = { dark: "#0a1119", light: "#eef4f8" };
 const element = (id) => document.getElementById(id);
 
 const darkMedia = window.matchMedia("(prefers-color-scheme: dark)");
+
+/**
+ * The river flow animation is continuous, unprompted motion across most of the
+ * viewport, which is exactly what this preference is for. It stays available —
+ * the speed slider still turns it up — but it must not be the default for a
+ * visitor who has asked their OS for less movement.
+ */
+const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
 
 const state = {
   bundle: null,
@@ -176,7 +185,11 @@ async function boot() {
 
     map.getSource("live").setData(liveFeatures(bundle.live));
 
-    state.flow = animateFlow(map, { speed: 0.55 });
+    const speedControl = element("flow-speed");
+    const initialSpeed = reducedMotion.matches ? 0 : Number(speedControl.value) / 100;
+    speedControl.value = String(Math.round(initialSpeed * 100));
+    element("speed-readout").textContent = initialSpeed === 0 ? "off" : Math.round(initialSpeed * 100) + "%";
+    state.flow = animateFlow(map, { speed: initialSpeed });
 
     bindControls(map);
     bindInteractions(map);
@@ -336,6 +349,16 @@ function bindControls(map) {
   });
 
   element("detail-close").addEventListener("click", () => clearSelection(map));
+
+  element("about-link").addEventListener("click", (event) => {
+    event.preventDefault();
+    // Deselect first: the panel is one surface, and leaving a station selected
+    // would let the next `render` overwrite the About text mid-read.
+    clearSelection(map);
+    renderAbout(element("detail-body"), bundle.meta);
+    element("detail").hidden = false;
+    element("detail-close").focus();
+  });
 
   document.addEventListener("keydown", (event) => {
     if (event.target instanceof HTMLInputElement && event.target.type !== "range") return;

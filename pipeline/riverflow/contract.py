@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import math
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -82,6 +83,15 @@ def validate_bundle(root: Path) -> list[str]:
     if network_path.exists():
         _validate_network(read_json(network_path), errors)
 
+    # The live layer is optional in the same way, and is validated separately from
+    # stations.json because it comes from a different service with different
+    # identifiers (docs/adr/0004) - it is not a subset of the archive.
+    live_path = root / "live.json"
+    live: Any = None
+    if live_path.exists():
+        live = read_json(live_path)
+        _validate_live(live, errors)
+
     # Cross-file coherence: the counts advertised in meta.json are what the UI
     # shows before the big files land, so a mismatch is a user-visible lie.
     if isinstance(meta.get("counts"), dict):
@@ -89,7 +99,73 @@ def validate_bundle(root: Path) -> list[str]:
         if declared is not None and declared != len(ids):
             errors.append(f"meta.counts.stations={declared} but stations.json has {len(ids)}")
 
+        declared_live = meta["counts"].get("live")
+        published_live = len(live) if isinstance(live, list) else 0
+        if declared_live is not None and declared_live != published_live:
+            # Catches the failure that matters: a live fetch that failed, leaving a
+            # previous run's snapshot on disk to be served as if it were current.
+            errors.append(
+                f"meta.counts.live={declared_live} but live.json has {published_live}"
+                + ("" if live_path.exists() else " (no live.json present)")
+            )
+
     return errors
+
+
+def _validate_live(live: Any, errors: list[str]) -> None:
+    """Validate the real-time snapshot.
+
+    Every field here is rendered directly: `at` becomes a `<time datetime=...>`
+    and a "3 h ago" label, so an unparseable stamp is an Invalid Date in the
+    browser rather than a cosmetic problem.
+    """
+    if not _check(isinstance(live, list), "live.json must be an array", errors):
+        return
+
+    seen: set[str] = set()
+    for index, station in enumerate(live):
+        where = f"live[{index}]"
+        if not isinstance(station, dict):
+            errors.append(f"{where} must be an object")
+            continue
+
+        station_id = station.get("id")
+        if not isinstance(station_id, str) or not station_id:
+            errors.append(f"{where}.id must be a non-empty string")
+        elif station_id in seen:
+            errors.append(f"{where}.id duplicated: {station_id}")
+        else:
+            seen.add(station_id)
+
+        _check(bool(station.get("name")), f"{where}.name is required", errors)
+
+        lon, lat = station.get("lon"), station.get("lat")
+        if isinstance(lon, (int, float)) and isinstance(lat, (int, float)):
+            _check(-180 <= lon <= 180, f"{where}.lon out of range: {lon}", errors)
+            _check(-90 <= lat <= 90, f"{where}.lat out of range: {lat}", errors)
+            _check(not (lon == 0 and lat == 0), f"{where} sits at null island (0,0)", errors)
+        else:
+            errors.append(f"{where}.lon/lat must be numbers")
+
+        value = station.get("value")
+        if not isinstance(value, (int, float)) or isinstance(value, bool):
+            errors.append(f"{where}.value must be a number")
+        elif math.isnan(value) or math.isinf(value):
+            errors.append(f"{where}.value is NaN/Inf")
+        elif value < 0:
+            errors.append(f"{where}.value is negative discharge: {value}")
+
+        at = station.get("at")
+        if not isinstance(at, str) or not _parses_as_instant(at):
+            errors.append(f"{where}.at must be an ISO-8601 instant, got {at!r}")
+
+
+def _parses_as_instant(text: str) -> bool:
+    try:
+        datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    return True
 
 
 def _validate_meta(meta: Any, errors: list[str]) -> None:

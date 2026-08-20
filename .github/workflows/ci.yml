@@ -75,9 +75,6 @@ jobs:
           cache-dependency-path: web/package-lock.json
 
       - name: Install Dependencies
-        run: npm install
-
-      - name: Update Dependencies
         run: npm ci
         working-directory: web
 

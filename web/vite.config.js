@@ -1,7 +1,9 @@
 import { defineConfig } from "vite";
 import { cp, stat } from "node:fs/promises";
 import { createReadStream } from "node:fs";
-import { resolve, normalize, join } from "node:path";
+import { resolve, extname, basename } from "node:path";
+
+import { DATA_PREFIX, resolveDataPath } from "./dev-data-route.js";
 
 const WEB_DIR = import.meta.dirname;
 const DATA_DIR = resolve(WEB_DIR, "../data");
@@ -26,22 +28,22 @@ function dataBundle() {
 
     configureServer(server) {
       server.middlewares.use((request, response, next) => {
-        if (!request.url?.startsWith("/data/")) return next();
+        if (!request.url?.startsWith(DATA_PREFIX)) return next();
 
-        // Resolve then verify containment: without this check a request for
-        // /data/../../.ssh/id_rsa would escape the data directory.
-        const target = normalize(join(DATA_DIR, request.url.slice("/data/".length)));
-        if (!target.startsWith(DATA_DIR)) {
-          response.statusCode = 403;
-          return response.end("forbidden");
+        // Containment lives in dev-data-route.js, where it is unit-tested.
+        const { status, path, pathname } = resolveDataPath(request.url, DATA_DIR);
+        if (status !== 200) {
+          response.statusCode = status;
+          return response.end(status === 403 ? "forbidden" : "bad request");
         }
 
-        const extension = target.slice(target.lastIndexOf("."));
-        response.setHeader("Content-Type", CONTENT_TYPES[extension] ?? "application/octet-stream");
-        createReadStream(target)
+        response.setHeader("Content-Type", CONTENT_TYPES[extname(path)] ?? "application/octet-stream");
+        // Nothing here is HTML, and saying so costs one header.
+        response.setHeader("X-Content-Type-Options", "nosniff");
+        createReadStream(path)
           .on("error", () => {
             response.statusCode = 404;
-            response.end(`not found: ${request.url} - run the ingest pipeline first`);
+            response.end(`not found: ${pathname} - run the ingest pipeline first`);
           })
           .pipe(response);
       });
@@ -58,7 +60,137 @@ function dataBundle() {
         );
         return;
       }
-      await cp(DATA_DIR, resolve(WEB_DIR, "dist/data"), { recursive: true });
+      await cp(DATA_DIR, resolve(WEB_DIR, "dist/data"), {
+        recursive: true,
+        // Skip dotfiles. `data/` picks up OS and editor droppings — .DS_Store
+        // most often — and a recursive copy would publish them: they were
+        // reaching the deployed site, where a directory-metadata file is junk at
+        // best and a listing of names nobody chose to publish at worst.
+        //
+        // `upload-pages-artifact` v4+ drops them from the artifact anyway, so
+        // filtering here keeps the local build, the preview and the deployed
+        // site showing the same tree instead of three slightly different ones.
+        filter: (source) => !basename(source).startsWith("."),
+      });
+    },
+  };
+}
+
+/**
+ * The only third-party origins the page is allowed to talk to.
+ *
+ * Both are keyless public services (see docs/adr/0002): OpenFreeMap serves the
+ * basemap style, its glyphs, sprites and vector tiles; the AWS Open Data bucket
+ * serves terrarium-encoded elevation for the optional 3D terrain.
+ */
+const TILE_ORIGIN = "https://tiles.openfreemap.org";
+const TERRAIN_ORIGIN = "https://s3.amazonaws.com";
+
+/**
+ * Content Security Policy for the built site.
+ *
+ * Notes on the two directives that look loose:
+ *
+ *   `style-src 'unsafe-inline'` — MapLibre positions every marker, control and
+ *   popup by writing to `element.style`, and CSP counts a style *attribute* as
+ *   inline style. There is no nonce mechanism for attributes, so the alternative
+ *   is not a tighter policy, it is a broken map.
+ *
+ *   `worker-src blob:` — MapLibre compiles its tile workers from a Blob URL.
+ *
+ * Everything else is closed: no inline script, no `eval`, no plugins, no framing,
+ * no form posts, and no base-tag rewriting of relative URLs.
+ */
+const CSP_DIRECTIVES = {
+  "default-src": ["'self'"],
+  "script-src": ["'self'"],
+  "worker-src": ["'self'", "blob:"],
+  // Retained for browsers that predate worker-src and fall back to child-src.
+  "child-src": ["'self'", "blob:"],
+  "style-src": ["'self'", "'unsafe-inline'"],
+  "img-src": ["'self'", "data:", "blob:", TILE_ORIGIN, TERRAIN_ORIGIN],
+  "connect-src": ["'self'", TILE_ORIGIN, TERRAIN_ORIGIN],
+  "font-src": ["'self'", "data:"],
+  "manifest-src": ["'self'"],
+  "base-uri": ["'none'"],
+  "object-src": ["'none'"],
+  "form-action": ["'none'"],
+  "frame-ancestors": ["'none'"],
+};
+
+const csp = (directives) =>
+  Object.entries(directives)
+    .map(([name, values]) => `${name} ${values.join(" ")}`)
+    .join("; ");
+
+/**
+ * Ship the security headers with the build.
+ *
+ * A static site has no server to set headers on, so this emits both forms and
+ * lets the host use whichever it understands:
+ *
+ *   * a `<meta http-equiv>` CSP, which works everywhere including GitHub Pages;
+ *   * a `_headers` file, which Cloudflare Pages (the host README recommends)
+ *     turns into real response headers.
+ *
+ * Both are generated from `CSP_DIRECTIVES` above so they cannot drift apart. The
+ * meta form drops `frame-ancestors`, which browsers ignore outside a real header —
+ * `_headers` carries it, plus `X-Frame-Options` for the same job.
+ *
+ * Applied at build only: Vite's dev server needs inline scripts and a websocket
+ * for HMR, and the way that usually gets "fixed" is by loosening the policy that
+ * ships to production.
+ */
+function securityHeaders() {
+  // Directives a `<meta http-equiv>` policy is not allowed to carry: browsers
+  // parse the tag but ignore these, so listing them there reads as protection
+  // that is not actually in force.
+  const HEADER_ONLY = new Set(["frame-ancestors", "report-uri", "sandbox"]);
+  const metaDirectives = Object.fromEntries(
+    Object.entries(CSP_DIRECTIVES).filter(([name]) => !HEADER_ONLY.has(name)),
+  );
+
+  return {
+    name: "security-headers",
+    apply: "build",
+
+    transformIndexHtml() {
+      return [
+        {
+          tag: "meta",
+          attrs: { "http-equiv": "Content-Security-Policy", content: csp(metaDirectives) },
+          injectTo: "head-prepend",
+        },
+      ];
+    },
+
+    generateBundle() {
+      this.emitFile({
+        type: "asset",
+        fileName: "_headers",
+        source: [
+          "/*",
+          `  Content-Security-Policy: ${csp(CSP_DIRECTIVES)}`,
+          "  X-Content-Type-Options: nosniff",
+          "  X-Frame-Options: DENY",
+          "  Referrer-Policy: no-referrer",
+          // No camera, microphone or location is ever requested. MapLibre's
+          // geolocate control asks the browser directly and degrades if refused.
+          "  Permissions-Policy: accelerometer=(), camera=(), geolocation=(self), gyroscope=(), microphone=(), payment=(), usb=()",
+          "  Strict-Transport-Security: max-age=31536000; includeSubDomains",
+          "  Cross-Origin-Opener-Policy: same-origin",
+          "  Cross-Origin-Resource-Policy: same-origin",
+          "",
+          // The bundle is regenerated several times a day and served under a
+          // content hash, so the JSON must revalidate while the assets need not.
+          "/data/*",
+          "  Cache-Control: public, max-age=300, must-revalidate",
+          "",
+          "/assets/*",
+          "  Cache-Control: public, max-age=31536000, immutable",
+          "",
+        ].join("\n"),
+      });
     },
   };
 }
@@ -67,7 +199,7 @@ export default defineConfig({
   // Relative asset URLs, so one build works at a domain root (Cloudflare Pages)
   // and under a /repo-name/ prefix (GitHub Pages) with no rebuild.
   base: "./",
-  plugins: [dataBundle()],
+  plugins: [dataBundle(), securityHeaders()],
   server: { port: 5173 },
   build: {
     outDir: "dist",

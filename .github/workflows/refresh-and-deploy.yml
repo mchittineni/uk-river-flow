@@ -1,29 +1,7 @@
 name: Refresh data and deploy
 
-# The whole "backend" of this project.
-#
-# Design decision (docs/adr/0005): refreshed data is *not* committed. It is
-# generated in the job, validated, built into the site and published straight to
-# GitHub Pages as a deployment artifact. Committing a ~450 KB bundle several times
-# a day would add hundreds of megabytes of git objects a year, for data that is
-# already reproducible from a free public API in about a minute.
-#
-# What *is* committed is a periodically refreshed seed bundle (refresh-seed.yml),
-# so a fresh clone works offline and out of the box.
-#
-# Cadence: the Environment Agency archive layer is daily mean discharge, so
-# refreshing more than a few times a day buys nothing. Three runs a day keeps the
-# live 15-minute layer reasonably current while staying a negligible load on a free
-# public service.
-#
-# Security note: no step interpolates attacker-controllable event data into a
-# shell. The only inputs are a number and a boolean from workflow_dispatch, and
-# both reach the shell through `env` as quoted variables.
-
 on:
   schedule:
-    # 05:20, 11:20 and 17:20 UTC. Offset from the hour because everyone's cron
-    # fires on the hour and shared runners queue behind it.
     - cron: "20 5,11,17 * * *"
   push:
     branches: [main]
@@ -38,8 +16,6 @@ on:
         type: boolean
         default: false
 
-# One deployment at a time. Without this, overlapping runs race on the Pages
-# deployment and the loser fails noisily for no reason.
 concurrency:
   group: pages
   cancel-in-progress: false
@@ -52,16 +28,22 @@ jobs:
     name: Ingest, validate, build
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@v4
 
-      - uses: actions/setup-python@v5
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Setup Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.13"
 
-      - uses: actions/setup-node@v4
+      - name: Setup Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
-          node-version: "22"
+          node-version: "24"
           cache: npm
           cache-dependency-path: web/package-lock.json
 
@@ -78,16 +60,9 @@ jobs:
           python3 pipeline/ingest_uk.py "${args[@]}"
 
       - name: Validate against the published contract
-        # Runs *before* the build. A bundle that violates the contract must never
-        # reach the deployed site, because the front end can only answer it with an
-        # error page - and a stale-but-valid site beats a broken fresh one.
         run: python3 pipeline/validate_data.py --root data/v1
 
       - name: Guard against a collapse in station count
-        # An upstream schema change or a partial outage can produce a technically
-        # valid bundle that covers a fraction of the network. The contract cannot
-        # catch that - 20 stations is as valid as 1,000 - so this compares the fresh
-        # bundle against the committed one, which the ingest overwrote in place.
         run: |
           set -euo pipefail
           if ! git show "HEAD:data/v1/stations.json" > /tmp/committed-stations.json 2>/dev/null; then
@@ -117,15 +92,23 @@ jobs:
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
-      - run: npm ci
+      - name: Install Dependencies
+        run: npm ci
         working-directory: web
 
-      - run: npm run build
+      - name: Build
+        run: npm run build
         working-directory: web
 
-      - uses: actions/configure-pages@v5
+      - name: Confirm the build still ships its security headers
+        run: npm run check:headers
+        working-directory: web
 
-      - uses: actions/upload-pages-artifact@v3
+      - name: Configure Pages
+        uses: actions/configure-pages@45bfe0192ca1faeb007ade9deae92b16b8254a0d # v6.0.0
+
+      - name: Upload Pages Artifact
+        uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
         with:
           path: web/dist
 
@@ -139,6 +122,8 @@ jobs:
     environment:
       name: github-pages
       url: ${{ steps.deploy.outputs.page_url }}
+      
     steps:
-      - id: deploy
-        uses: actions/deploy-pages@v4
+      - name: Deploy to GitHub Pages
+        id: deploy
+        uses: actions/deploy-pages@cd2ce8fcbc39b97be8ca5fce6e763baed58fa128 # v5.0.0

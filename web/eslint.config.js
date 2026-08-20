@@ -11,7 +11,7 @@ import js from "@eslint/js";
 export default [
   js.configs.recommended,
   {
-    files: ["src/**/*.js", "*.config.js"],
+    files: ["src/**/*.js", "scripts/**/*.mjs", "*.js"],
     languageOptions: {
       ecmaVersion: 2023,
       sourceType: "module",
@@ -28,6 +28,8 @@ export default [
         Intl: "readonly",
         HTMLInputElement: "readonly",
         URL: "readonly",
+        // Node surface, for the build-time scripts and the Vite config.
+        process: "readonly",
       },
     },
     rules: {

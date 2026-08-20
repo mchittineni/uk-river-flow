@@ -6,7 +6,7 @@
  */
 
 import { definition, h, replaceChildren } from "./dom.js";
-import { formatDateTime, formatDischarge, flowState, relativeAge, valueAt } from "./data.js";
+import { describeInstant, formatDateTime, formatDischarge, flowState, relativeAge, valueAt } from "./data.js";
 import { sparkline, statePill } from "./sparkline.js";
 
 const STATE_LABELS = {
@@ -116,14 +116,14 @@ export function renderStationDetail(container, { station, bundle, index }) {
 }
 
 export function renderLiveDetail(container, station) {
-  const observed = new Date(station.at);
+  const { valid, date: observed, iso } = describeInstant(station.at);
   replaceChildren(container, [
     h("h2.detail__name", { text: station.name }),
     station.river && h("p.detail__river", { text: station.river }),
     h("p.detail__value", { text: formatDischarge(station.value) }),
     h("p.detail__state", {}, [
       statePill("normal", "Live · 15-minute"),
-      h("time", { datetime: observed.toISOString(), text: relativeAge(observed) }),
+      h("time", { datetime: iso, text: valid ? relativeAge(observed) : "time unknown" }),
     ]),
     h("p.detail__context", {
       text:
@@ -132,7 +132,50 @@ export function renderLiveDetail(container, station) {
     }),
     h("dl.detail__facts", {}, [
       definition("Coordinates", station.lat.toFixed(4) + ", " + station.lon.toFixed(4)),
-      definition("Observed", formatDateTime(observed)),
+      definition("Observed", valid ? formatDateTime(observed) : "not reported"),
+    ]),
+  ]);
+}
+
+/**
+ * The "About" panel behind the footer link.
+ *
+ * Reuses the station detail surface rather than adding a second overlay, and is
+ * built from `meta.json` for the same reason the footer is: the window, the
+ * counts and the licence list are all things that change with the data, and a
+ * hand-written paragraph would be wrong within a month.
+ */
+export function renderAbout(container, meta) {
+  const counts = meta.counts ?? {};
+  const window = meta.window ?? {};
+
+  const facts = [
+    definition("Data window", window.start && window.end ? window.start + " to " + window.end : "unknown"),
+    definition("Gauging stations", (counts.stations ?? 0).toLocaleString("en-GB")),
+    definition("Live stations", (counts.live ?? 0).toLocaleString("en-GB")),
+    definition("Generated", formatDateTime(new Date(meta.generated_at))),
+    definition("Data contract", "v" + meta.contract),
+  ];
+
+  replaceChildren(container, [
+    h("h2.detail__name", { text: "About this map" }),
+    h("p.detail__context", {
+      text:
+        "Every gauge is coloured against its own record rather than an absolute scale, because " +
+        "discharge is only meaningful relative to the catchment: 20 m³/s is a drought on the Thames " +
+        "and a once-a-decade flood on a chalk stream.",
+    }),
+    h("p.detail__context", {
+      text:
+        "There is no server and no runtime API call. A scheduled job fetches the open data, validates " +
+        "it against a published contract, and the page reads the result as static JSON from this same " +
+        "origin — so an upstream outage shows you yesterday's map instead of an error.",
+    }),
+    h("dl.detail__facts", {}, facts),
+    h("p.detail__note", {}, [
+      "Source and full documentation on ",
+      h("a", { href: "https://github.com/mchittineni/uk-river-flow", rel: "noopener", text: "GitHub" }),
+      ". Data is open under the licences listed in the footer.",
     ]),
   ]);
 }

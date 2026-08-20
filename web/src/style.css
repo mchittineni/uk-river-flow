@@ -20,6 +20,7 @@
   --edge-strong: rgb(120 160 200 / 34%);
   --accent: #22d3ee;
   --accent-ink: #04141a;
+  --accent-soft: rgb(34 211 238 / 16%);
   --warn: #fbbf24;
 
   --radius: 10px;
@@ -31,8 +32,32 @@
   --mono: ui-monospace, "SF Mono", "Cascadia Code", Menlo, monospace;
 }
 
+:root[data-theme="light"] {
+  --ink: #0d1b26;
+  --ink-dim: #43596b;
+  --ink-faint: #7b8ea0;
+  --ground: #eef4f8;
+  --panel: rgb(255 255 255 / 88%);
+  --panel-solid: #ffffff;
+  --edge: rgb(20 60 90 / 14%);
+  --edge-strong: rgb(20 60 90 / 26%);
+  --accent: #0e7490;
+  --accent-ink: #ffffff;
+  --accent-soft: rgb(14 116 144 / 12%);
+  --shadow: 0 8px 28px rgb(20 50 80 / 16%);
+}
+
+/*
+ * The same light palette again, for the pre-script frame only: the theme control
+ * writes `data-theme` from JavaScript, so this block is what a visitor who has
+ * asked the OS for light sees before the module graph evaluates.
+ *
+ * It duplicates the block above by necessity — a selector list cannot straddle a
+ * media query — so a token added to one must be added to the other. Forgetting
+ * that is silent: the token simply falls back to its dark value.
+ */
 @media (prefers-color-scheme: light) {
-  :root {
+  :root:not([data-theme="dark"]):not([data-theme="light"]) {
     --ink: #0d1b26;
     --ink-dim: #43596b;
     --ink-faint: #7b8ea0;
@@ -43,6 +68,7 @@
     --edge-strong: rgb(20 60 90 / 26%);
     --accent: #0e7490;
     --accent-ink: #ffffff;
+    --accent-soft: rgb(14 116 144 / 12%);
     --shadow: 0 8px 28px rgb(20 50 80 / 16%);
   }
 }
@@ -331,6 +357,10 @@ input[type="range"]:focus-visible {
   gap: 5px;
 }
 
+.segmented--3 {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
 .segmented button {
   display: flex;
   flex-direction: column;
@@ -349,6 +379,11 @@ input[type="range"]:focus-visible {
     color 0.15s ease;
 }
 
+.segmented button:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
 .segmented button small {
   color: var(--ink-faint);
   font-size: 9.5px;
@@ -358,7 +393,7 @@ input[type="range"]:focus-visible {
 
 .segmented button[aria-checked="true"] {
   border-color: var(--accent);
-  background: rgb(34 211 238 / 16%);
+  background: var(--accent-soft);
   color: var(--ink);
 }
 

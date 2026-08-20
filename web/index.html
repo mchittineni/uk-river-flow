@@ -58,14 +58,37 @@
 
     <!-- Control rail -->
     <section class="rail" aria-label="Map controls">
+      <!-- Segmented controls carry a roving tabindex: the group is one tab stop and
+           the arrow keys move within it, per the WAI-ARIA radiogroup pattern. The
+           markup below is the pre-script state; radiogroup.js maintains it after. -->
       <div class="rail__group">
-        <label class="rail__label" for="layer-select">Layer</label>
-        <div class="segmented" role="radiogroup" aria-labelledby="layer-select" id="layer-select">
-          <button type="button" role="radio" aria-checked="true" data-layer="archive">
+        <span class="rail__label" id="layer-select-label">Layer</span>
+        <div class="segmented" role="radiogroup" aria-labelledby="layer-select-label" id="layer-select">
+          <button type="button" role="radio" aria-checked="true" tabindex="0" data-layer="archive">
             Daily<small>1,000+ gauges</small>
           </button>
-          <button type="button" role="radio" aria-checked="false" data-layer="live">
+          <button type="button" role="radio" aria-checked="false" tabindex="-1" data-layer="live">
             Live<small>15-minute</small>
+          </button>
+        </div>
+      </div>
+
+      <div class="rail__group">
+        <span class="rail__label" id="theme-select-label">Theme</span>
+        <div
+          class="segmented segmented--3"
+          role="radiogroup"
+          aria-labelledby="theme-select-label"
+          id="theme-select"
+        >
+          <button type="button" role="radio" aria-checked="false" tabindex="-1" data-theme-mode="dark">
+            Dark
+          </button>
+          <button type="button" role="radio" aria-checked="true" tabindex="0" data-theme-mode="system">
+            System
+          </button>
+          <button type="button" role="radio" aria-checked="false" tabindex="-1" data-theme-mode="light">
+            Light
           </button>
         </div>
       </div>
@@ -104,6 +127,10 @@
       </div>
 
       <div class="rail__group rail__group--toggles">
+        <label class="switch">
+          <input type="checkbox" id="toggle-stations" checked />
+          <span>Stations</span>
+        </label>
         <label class="switch">
           <input type="checkbox" id="toggle-rivers" checked />
           <span>River network</span>

@@ -16,7 +16,7 @@ import "maplibre-gl/dist/maplibre-gl.css";
 import { STATE_COLOURS, STATE_COLOUR_EXPRESSION } from "./palette.js";
 
 /** Keyless, quota-free vector tiles (OpenMapTiles schema, ODbL). */
-const BASEMAP_STYLES = {
+export const BASEMAP_STYLES = {
   dark: "https://tiles.openfreemap.org/styles/dark",
   light: "https://tiles.openfreemap.org/styles/positron",
 };
@@ -101,9 +101,17 @@ export function createMap(container, meta, { theme = "dark" } = {}) {
 
 /** Add our sources and layers. Must run after the style has loaded. */
 export function addDataLayers(map, { network }) {
-  map.addSource("rivers", { type: "geojson", data: network ?? EMPTY });
-  map.addSource("stations", { type: "geojson", data: EMPTY });
-  map.addSource("live", { type: "geojson", data: EMPTY });
+  if (!map.getSource("rivers")) {
+    map.addSource("rivers", { type: "geojson", data: network ?? EMPTY });
+  } else {
+    map.getSource("rivers").setData(network ?? EMPTY);
+  }
+  if (!map.getSource("stations")) {
+    map.addSource("stations", { type: "geojson", data: EMPTY });
+  }
+  if (!map.getSource("live")) {
+    map.addSource("live", { type: "geojson", data: EMPTY });
+  }
 
   // Insert beneath the basemap's label layers so place names stay readable on top
   // of the rivers. Falling back to undefined (topmost) keeps this working if
@@ -112,7 +120,15 @@ export function addDataLayers(map, { network }) {
     .getStyle()
     .layers.find((layer) => layer.type === "symbol" && /label|place|poi/i.test(layer.id))?.id;
 
-  map.addLayer(
+  // Idempotent by construction, because this runs again after every basemap
+  // swap. A style change normally removes our layers for us, but MapLibre's
+  // style diff can preserve them, and a second `addLayer` on a live id throws.
+  const addLayer = (layer, before) => {
+    if (map.getLayer(layer.id)) map.removeLayer(layer.id);
+    map.addLayer(layer, before);
+  };
+
+  addLayer(
     {
       id: LAYERS.riverBase,
       type: "line",
@@ -139,7 +155,7 @@ export function addDataLayers(map, { network }) {
     firstLabelLayer,
   );
 
-  map.addLayer(
+  addLayer(
     {
       id: LAYERS.riverFlow,
       type: "line",
@@ -155,7 +171,7 @@ export function addDataLayers(map, { network }) {
     firstLabelLayer,
   );
 
-  map.addLayer({
+  addLayer({
     id: LAYERS.stationsHalo,
     type: "circle",
     source: "stations",
@@ -175,7 +191,7 @@ export function addDataLayers(map, { network }) {
     },
   });
 
-  map.addLayer({
+  addLayer({
     id: LAYERS.stations,
     type: "circle",
     source: "stations",
@@ -201,7 +217,7 @@ export function addDataLayers(map, { network }) {
   // The live layer is a distinct shape, not a distinct colour: the two layers use
   // different station networks that cannot be reliably joined, and a square
   // marker makes "this is the other network" obvious without a legend lookup.
-  map.addLayer({
+  addLayer({
     id: LAYERS.live,
     type: "circle",
     source: "live",
@@ -215,7 +231,7 @@ export function addDataLayers(map, { network }) {
     },
   });
 
-  map.addLayer({
+  addLayer({
     id: LAYERS.selected,
     type: "circle",
     source: "stations",
@@ -226,6 +242,53 @@ export function addDataLayers(map, { network }) {
       "circle-stroke-width": 2.5,
       "circle-radius": ["interpolate", ["linear"], ["zoom"], 4, 7, 10, 16],
     },
+  });
+}
+
+/**
+ * Counter used to discard superseded style loads.
+ *
+ * Switching basemap swaps the *entire* style, which is asynchronous. Clicking
+ * Dark then Light before the first finishes leaves two pending `style.load`
+ * callbacks, and the stale one would re-add our sources and layers to a style
+ * that is already being replaced — MapLibre throws on a duplicate layer id, and
+ * the throw lands inside an event handler where nothing catches it.
+ */
+let styleGeneration = 0;
+
+/**
+ * Swap the basemap style, then re-attach everything the swap tore down.
+ *
+ * `setStyle` discards all sources and layers, ours included, so the caller's
+ * `onReady` is where the data layers, toggles and selection get rebuilt. The
+ * camera is read before the swap and restored after, because a theme change
+ * should not move the map out from under the visitor.
+ */
+export function setMapTheme(map, theme, { network, onReady, preserveView } = {}) {
+  const styleUrl = BASEMAP_STYLES[theme] ?? BASEMAP_STYLES.dark;
+  const view = preserveView
+    ? {
+        center: map.getCenter(),
+        zoom: map.getZoom(),
+        bearing: map.getBearing(),
+        pitch: map.getPitch(),
+        projection: map.getProjection()?.type ?? "mercator",
+      }
+    : null;
+
+  const generation = ++styleGeneration;
+  map.setStyle(styleUrl);
+  map.once("style.load", () => {
+    if (generation !== styleGeneration) return;
+
+    if (view) {
+      map.setCenter(view.center);
+      map.setZoom(view.zoom);
+      map.setBearing(view.bearing);
+      map.setPitch(view.pitch);
+      setGlobe(map, view.projection === "globe");
+    }
+    if (typeof onReady === "function") onReady(map, { network });
   });
 }
 

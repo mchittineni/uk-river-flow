@@ -19,6 +19,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+import ingest_uk
 from riverflow import contract, geometry, http, series
 
 
@@ -302,6 +303,128 @@ class TestContract(unittest.TestCase):
             encoding="utf-8",
         )
         self.assertTrue(any("LineString" in error for error in contract.validate_bundle(self.root)))
+
+
+class TestLiveLayer(unittest.TestCase):
+    """The live layer is published to the browser and rendered without further
+    checking, so the validator is the only thing standing between a bad
+    flood-monitoring response and a visibly wrong map."""
+
+    def setUp(self):
+        self.dir = tempfile.TemporaryDirectory()
+        self.root = Path(self.dir.name)
+        self.addCleanup(self.dir.cleanup)
+
+    def write(self, live, *, declared=None):
+        stations = [
+            {
+                "id": "s1",
+                "name": "Test gauge",
+                "lon": -1.5,
+                "lat": 53.2,
+                "value": 4.0,
+                "state": "normal",
+            }
+        ]
+        contract.write_json(
+            self.root / "meta.json",
+            {
+                "contract": 1,
+                "generated_at": "2026-01-01T00:00:00+00:00",
+                "region": {"code": "GB", "name": "United Kingdom"},
+                "units": {"discharge": "m3/s"},
+                "counts": {"stations": 1, "live": len(live) if declared is None else declared},
+                "sources": [{"name": "EA", "licence": "OGL v3", "url": "https://example.org"}],
+            },
+        )
+        contract.write_json(self.root / "stations.json", stations)
+        contract.write_json(
+            self.root / "series.json",
+            {"t": [1700000000, 1700086400], "step": 86400, "v": {"s1": [3.5, 4.0]}},
+        )
+        if live is not None:
+            contract.write_json(self.root / "live.json", live)
+
+    @staticmethod
+    def reading(**overrides):
+        base = {
+            "id": "rt-1234",
+            "name": "Live gauge",
+            "lon": -1.5,
+            "lat": 53.2,
+            "value": 12.5,
+            "at": "2026-01-01T09:15:00+00:00",
+        }
+        base.update(overrides)
+        return base
+
+    def test_a_good_live_layer_passes(self):
+        self.write([self.reading()])
+        self.assertEqual(contract.validate_bundle(self.root), [])
+
+    def test_the_layer_stays_optional(self):
+        self.write([], declared=0)
+        (self.root / "live.json").unlink(missing_ok=True)
+        self.assertEqual(contract.validate_bundle(self.root), [])
+
+    def test_null_island_is_rejected(self):
+        self.write([self.reading(lon=0, lat=0)])
+        self.assertTrue(any("null island" in error for error in contract.validate_bundle(self.root)))
+
+    def test_negative_discharge_is_rejected(self):
+        self.write([self.reading(value=-3.0)])
+        self.assertTrue(any("negative discharge" in error for error in contract.validate_bundle(self.root)))
+
+    def test_an_unparseable_timestamp_is_rejected(self):
+        # The exact string the ingest used to emit when `dateTime` was absent. It
+        # becomes an Invalid Date in the browser rather than a visible error.
+        self.write([self.reading(at="None")])
+        self.assertTrue(any("ISO-8601" in error for error in contract.validate_bundle(self.root)))
+
+    def test_duplicate_live_ids_are_rejected(self):
+        self.write([self.reading(), self.reading()])
+        self.assertTrue(any("duplicated" in error for error in contract.validate_bundle(self.root)))
+
+    def test_a_stale_live_file_is_caught_by_the_count_cross_check(self):
+        """The failure this guard exists for: the live fetch failed, meta says
+        zero, and last run's snapshot is still on disk being served as current."""
+        self.write([self.reading(), self.reading(id="rt-5678")], declared=0)
+        self.assertTrue(
+            any("meta.counts.live=0 but live.json has 2" in error for error in contract.validate_bundle(self.root))
+        )
+
+    def test_a_missing_live_file_with_a_nonzero_count_is_caught(self):
+        self.write([], declared=4)
+        (self.root / "live.json").unlink(missing_ok=True)
+        self.assertTrue(any("no live.json present" in error for error in contract.validate_bundle(self.root)))
+
+
+class TestTimestampParsing(unittest.TestCase):
+    """`parse_timestamp` decides what reaches the browser as a `<time>` value, and
+    normalises the string that `fetch_live` then compares for freshness."""
+
+    def test_offsets_are_normalised_to_utc(self):
+        self.assertEqual(
+            ingest_uk.parse_timestamp("2026-08-10T10:00:00+01:00"),
+            "2026-08-10T09:00:00+00:00",
+        )
+
+    def test_a_trailing_z_is_accepted(self):
+        self.assertEqual(ingest_uk.parse_timestamp("2026-08-10T09:00:00Z"), "2026-08-10T09:00:00+00:00")
+
+    def test_a_naive_stamp_is_assumed_utc(self):
+        self.assertEqual(ingest_uk.parse_timestamp("2026-08-10T09:00:00"), "2026-08-10T09:00:00+00:00")
+
+    def test_normalisation_makes_string_comparison_a_real_freshness_test(self):
+        # The ordering bug the normalisation exists to prevent: as raw text the
+        # +01:00 stamp sorts after the Z one while being the earlier instant.
+        earlier_raw, later_raw = "2026-08-10T10:00:00+01:00", "2026-08-10T09:30:00Z"
+        self.assertGreater(earlier_raw, later_raw)
+        self.assertLess(ingest_uk.parse_timestamp(earlier_raw), ingest_uk.parse_timestamp(later_raw))
+
+    def test_unparseable_input_is_rejected_rather_than_stringified(self):
+        for bad in (None, "", "   ", "not a date", 1700000000, {"dateTime": "2026-01-01"}):
+            self.assertIsNone(ingest_uk.parse_timestamp(bad), bad)
 
 
 class TestRateLimitHandling(unittest.TestCase):

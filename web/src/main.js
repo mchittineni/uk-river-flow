@@ -18,20 +18,37 @@ import {
   maplibregl,
   setBasemapLabels,
   setGlobe,
+  setMapTheme,
   setTerrain,
 } from "./map.js";
 import {
+  renderAbout,
   renderCredits,
   renderFatal,
   renderLiveDetail,
   renderStationDetail,
   renderSubtitle,
 } from "./panel.js";
+import { bindRadioGroup, setRadioGroupSelection } from "./radiogroup.js";
+import { getThemeModePreference, persistThemeMode, resolveThemeName } from "./theme.js";
 
 /** Milliseconds per frame when playing the time animation. */
 const PLAY_INTERVAL = 550;
 
+/** Keeps the browser chrome (address bar, task switcher) in step with the page. */
+const THEME_COLOURS = { dark: "#0a1119", light: "#eef4f8" };
+
 const element = (id) => document.getElementById(id);
+
+const darkMedia = window.matchMedia("(prefers-color-scheme: dark)");
+
+/**
+ * The river flow animation is continuous, unprompted motion across most of the
+ * viewport, which is exactly what this preference is for. It stays available —
+ * the speed slider still turns it up — but it must not be the default for a
+ * visitor who has asked their OS for less movement.
+ */
+const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
 
 const state = {
   bundle: null,
@@ -42,11 +59,88 @@ const state = {
   playTimer: null,
   selectedId: null,
   flow: null,
+  themeMode: "system",
+  /** The theme `themeMode` currently resolves to, so a no-op swap can be skipped. */
+  resolvedTheme: null,
+  stationsVisible: true,
+  riversVisible: true,
+  terrainEnabled: false,
+  globeEnabled: false,
+  labelsVisible: true,
   /** Station lookup by id, so click handling is O(1) rather than a scan. */
   byId: new Map(),
   /** Sorted latest values, used to turn the filter slider into a percentile. */
   sortedLatest: [],
 };
+
+/**
+ * Apply a theme mode: repaint the chrome, then swap the basemap if the theme it
+ * resolves to actually changed.
+ *
+ * `persist` defaults to off so the boot-time call does not write back a
+ * preference the visitor never expressed — the difference matters, because a
+ * stored "system" and an absent key mean the same thing today but only the
+ * absent key stays neutral if the default ever changes.
+ */
+function applyTheme(map, mode = state.themeMode, { persist = false } = {}) {
+  state.themeMode = mode;
+  if (persist) persistThemeMode(mode, window.localStorage);
+
+  const resolved = resolveThemeName(mode, darkMedia.matches);
+  document.documentElement.dataset.theme = resolved;
+  document.documentElement.style.colorScheme = resolved;
+
+  const themeColour = document.querySelector('meta[name="theme-color"]');
+  if (themeColour) themeColour.setAttribute("content", THEME_COLOURS[resolved]);
+
+  setRadioGroupSelection(element("theme-select"), (radio) => radio.dataset.themeMode === mode);
+
+  // Only the *resolved* theme drives the basemap, so moving between "system" and
+  // the explicit mode it already matches is a no-op. Worth checking: a style swap
+  // refetches the entire basemap style, its glyphs and its sprites.
+  const changed = resolved !== state.resolvedTheme;
+  state.resolvedTheme = resolved;
+  if (!map || !changed) return;
+
+  setMapTheme(map, resolved, {
+    network: state.bundle?.network,
+    preserveView: true,
+    onReady: () => {
+      addDataLayers(map, { network: state.bundle?.network });
+      // `addDataLayers` recreates the live source empty, because the style swap
+      // took the old one with it. Without this the Live layer comes back blank.
+      map.getSource("live").setData(liveFeatures(state.bundle.live));
+      setRiverVisibility(map, state.riversVisible);
+      setStationVisibility(map, state.stationsVisible);
+      setTerrain(map, state.terrainEnabled);
+      setGlobe(map, state.globeEnabled);
+      setBasemapLabels(map, state.labelsVisible);
+      // Reflect the layer choice without running the *user action*, which would
+      // dismiss the detail panel: changing theme is not deselecting a station.
+      applyLayerSelection(map);
+      render(map);
+    },
+  });
+}
+
+function setRiverVisibility(map, visible) {
+  state.riversVisible = visible;
+  const visibility = visible ? "visible" : "none";
+  for (const id of [LAYERS.riverBase, LAYERS.riverFlow]) {
+    if (map.getLayer(id)) map.setLayoutProperty(id, "visibility", visibility);
+  }
+}
+
+function setStationVisibility(map, visible) {
+  state.stationsVisible = visible;
+  const visibility = visible ? "visible" : "none";
+  for (const id of [LAYERS.stations, LAYERS.stationsHalo, LAYERS.selected]) {
+    if (map.getLayer(id)) map.setLayoutProperty(id, "visibility", visibility);
+  }
+  if (map.getLayer(LAYERS.live)) {
+    map.setLayoutProperty(LAYERS.live, "visibility", visible && state.layer === "live" ? "visible" : "none");
+  }
+}
 
 async function boot() {
   const boot = element("boot");
@@ -62,6 +156,7 @@ async function boot() {
 
   state.bundle = bundle;
   state.index = bundle.times.length - 1;
+  state.themeMode = getThemeModePreference(window.localStorage, "system");
   for (const station of bundle.stations) state.byId.set(station.id, station);
   state.sortedLatest = bundle.stations
     .map((station) => station.value)
@@ -71,7 +166,14 @@ async function boot() {
   renderSubtitle(element("masthead-subtitle"), bundle.meta);
   renderCredits(element("credits-body"), bundle.meta);
 
-  const map = createMap("map", bundle.meta);
+  // Paint the chrome before the map exists, so the shell is already the right
+  // theme on first frame rather than flashing dark and correcting itself.
+  applyTheme(null, state.themeMode);
+  const map = createMap("map", bundle.meta, { theme: state.resolvedTheme });
+
+  darkMedia.addEventListener?.("change", () => {
+    if (state.themeMode === "system") applyTheme(map, "system");
+  });
 
   map.on("load", () => {
     addDataLayers(map, { network: bundle.network });
@@ -83,7 +185,11 @@ async function boot() {
 
     map.getSource("live").setData(liveFeatures(bundle.live));
 
-    state.flow = animateFlow(map, { speed: 0.55 });
+    const speedControl = element("flow-speed");
+    const initialSpeed = reducedMotion.matches ? 0 : Number(speedControl.value) / 100;
+    speedControl.value = String(Math.round(initialSpeed * 100));
+    element("speed-readout").textContent = initialSpeed === 0 ? "off" : Math.round(initialSpeed * 100) + "%";
+    state.flow = animateFlow(map, { speed: initialSpeed });
 
     bindControls(map);
     bindInteractions(map);
@@ -173,6 +279,12 @@ function render(map) {
 function bindControls(map) {
   const { bundle } = state;
 
+  state.riversVisible = element("toggle-rivers").checked;
+  state.terrainEnabled = element("toggle-terrain").checked;
+  state.globeEnabled = element("toggle-globe").checked;
+  state.labelsVisible = element("toggle-labels").checked;
+  state.stationsVisible = element("toggle-stations").checked;
+
   const slider = element("time");
   slider.max = String(bundle.times.length - 1);
   slider.value = String(state.index);
@@ -204,35 +316,59 @@ function bindControls(map) {
     render(map);
   });
 
-  for (const button of document.querySelectorAll("#layer-select button")) {
-    button.addEventListener("click", () => selectLayer(map, button.dataset.layer));
-  }
+  bindRadioGroup(element("layer-select"), (radio) => selectLayer(map, radio.dataset.layer));
+  bindRadioGroup(element("theme-select"), (radio) =>
+    applyTheme(map, radio.dataset.themeMode, { persist: true }),
+  );
+
+  element("toggle-stations").addEventListener("change", (event) => {
+    const visible = event.target.checked;
+    if (!visible) clearSelection(map);
+    setStationVisibility(map, visible);
+  });
 
   element("toggle-rivers").addEventListener("change", (event) => {
-    const visibility = event.target.checked ? "visible" : "none";
-    for (const id of [LAYERS.riverBase, LAYERS.riverFlow]) {
-      map.setLayoutProperty(id, "visibility", visibility);
-    }
+    setRiverVisibility(map, event.target.checked);
   });
 
   element("toggle-terrain").addEventListener("change", (event) => {
+    state.terrainEnabled = event.target.checked;
     const ok = setTerrain(map, event.target.checked);
     if (!ok) event.target.checked = false;
   });
 
   element("toggle-globe").addEventListener("change", (event) => {
+    state.globeEnabled = event.target.checked;
     const ok = setGlobe(map, event.target.checked);
     if (!ok) event.target.checked = false;
   });
 
   element("toggle-labels").addEventListener("change", (event) => {
+    state.labelsVisible = event.target.checked;
     setBasemapLabels(map, event.target.checked);
   });
 
   element("detail-close").addEventListener("click", () => clearSelection(map));
 
+  element("about-link").addEventListener("click", (event) => {
+    event.preventDefault();
+    // Deselect first: the panel is one surface, and leaving a station selected
+    // would let the next `render` overwrite the About text mid-read.
+    clearSelection(map);
+    renderAbout(element("detail-body"), bundle.meta);
+    element("detail").hidden = false;
+    element("detail-close").focus();
+  });
+
   document.addEventListener("keydown", (event) => {
     if (event.target instanceof HTMLInputElement && event.target.type !== "range") return;
+
+    // Space and the arrows belong to whichever control has focus: Space activates
+    // a button, the arrows move within a segmented control. Claiming them
+    // globally means Space on "Latest" starts playback and never presses the
+    // button. Escape stays global — dismissing the panel should always work.
+    const onControl = typeof event.target?.closest === "function" && event.target.closest("button");
+    if (onControl && event.key !== "Escape") return;
 
     if (event.key === " ") {
       event.preventDefault();
@@ -252,24 +388,31 @@ function bindControls(map) {
   });
 }
 
+/** User picked a layer: apply it, and drop a selection that belongs to the old one. */
 function selectLayer(map, layer) {
+  if (state.layer === layer) return;
   state.layer = layer;
-  const archive = layer === "archive";
+  applyLayerSelection(map);
+  clearSelection(map);
+}
 
-  for (const button of document.querySelectorAll("#layer-select button")) {
-    button.setAttribute("aria-checked", String(button.dataset.layer === layer));
-  }
+/**
+ * Push `state.layer` into the DOM and the map.
+ *
+ * Separate from `selectLayer` because it also runs after a basemap swap, where
+ * clearing the visitor's selected station would be a side effect of changing
+ * theme rather than anything they asked for.
+ */
+function applyLayerSelection(map) {
+  const archive = state.layer === "archive";
 
-  for (const id of [LAYERS.stations, LAYERS.stationsHalo, LAYERS.selected]) {
-    map.setLayoutProperty(id, "visibility", archive ? "visible" : "none");
-  }
-  map.setLayoutProperty(LAYERS.live, "visibility", archive ? "none" : "visible");
+  setRadioGroupSelection(element("layer-select"), (radio) => radio.dataset.layer === state.layer);
+  setStationVisibility(map, state.stationsVisible);
 
   // The time controls describe the daily archive only; the live layer is a single
   // snapshot, so leaving an active slider on screen would imply history it lacks.
   element("time-group").hidden = !archive;
   if (!archive) stopPlaying();
-  clearSelection(map);
 }
 
 function startPlaying(map) {

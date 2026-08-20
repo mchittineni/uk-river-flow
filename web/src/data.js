@@ -162,6 +162,31 @@ export const formatDateTime = new Intl.DateTimeFormat("en-GB", {
   timeZoneName: "short",
 }).format;
 
+/**
+ * Describe an instant that came out of the data bundle.
+ *
+ * Extracted as a pure function because the failure it guards is silent and
+ * total: `new Date("None").toISOString()` throws a RangeError, so one reading
+ * with a missing timestamp would take down the whole detail panel rather than
+ * degrade one line of it. The pipeline no longer emits such a stamp and the
+ * contract validator rejects it, but this file is fed by a static bundle that a
+ * fork may generate differently, so the front end refuses to trust it.
+ *
+ * @returns {{valid: boolean, date: Date|null, iso: string|null}}
+ */
+const NO_INSTANT = { valid: false, date: null, iso: null };
+
+export function describeInstant(value) {
+  // Non-strings are rejected before `Date` sees them, mirroring `parse_timestamp`
+  // in the pipeline. This matters for `null` specifically: JS coerces it to 0 and
+  // hands back a perfectly valid 1 January 1970, so a missing timestamp would
+  // render as a real reading from fifty years ago rather than as missing.
+  if (typeof value !== "string" || value.trim() === "") return NO_INSTANT;
+  const date = new Date(value);
+  if (!Number.isFinite(date.getTime())) return NO_INSTANT;
+  return { valid: true, date, iso: date.toISOString() };
+}
+
 /** "3 hours ago" — used on live readings, where age is the thing that matters. */
 export function relativeAge(date, now = new Date()) {
   const minutes = Math.round((now - date) / 60000);

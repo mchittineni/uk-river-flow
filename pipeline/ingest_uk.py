@@ -208,6 +208,31 @@ def parse_date(text: str) -> datetime | None:
     return stamp.astimezone(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
 
 
+def parse_timestamp(value: object) -> str | None:
+    """Normalise an instant to a UTC ISO-8601 string, or `None` if unparseable.
+
+    Unlike `parse_date` this keeps the time of day, because the live layer is a
+    15-minute snapshot whose whole point is the minute it was taken.
+
+    Normalising to a single UTC representation is what makes the plain string
+    comparison in `fetch_live` a genuine freshness test: raw API stamps may carry
+    different offsets, and "2026-08-10T09:00:00+01:00" sorts after
+    "2026-08-10T09:30:00Z" as text while being the earlier instant.
+    """
+    if not isinstance(value, str):
+        return None
+    text = value.strip()
+    if not text:
+        return None
+    try:
+        stamp = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if stamp.tzinfo is None:
+        stamp = stamp.replace(tzinfo=timezone.utc)
+    return stamp.astimezone(timezone.utc).replace(microsecond=0).isoformat()
+
+
 def fetch_live(http: Http) -> list[dict]:
     """Latest 15-minute flow for every real-time station, in one request.
 
@@ -230,6 +255,12 @@ def fetch_live(http: Http) -> list[dict]:
         lat, lon = item.get("lat"), item.get("long")
         if not reference or not isinstance(lat, (int, float)) or not isinstance(lon, (int, float)):
             continue
+        # The same null-coordinate guard the archive layer gets. A flood-monitoring
+        # station with a missing easting/northing comes back as 0/0, which renders
+        # in the Gulf of Guinea and reads as a real gauge to anyone looking.
+        if not (-180 <= lon <= 180 and -90 <= lat <= 90) or (lon == 0 and lat == 0):
+            log.debug("dropping live station %s at null/out-of-range coords (%s, %s)", reference, lon, lat)
+            continue
         meta[reference] = {
             "id": f"rt-{reference}",
             "name": first_str(item.get("label")) or reference,
@@ -246,13 +277,18 @@ def fetch_live(http: Http) -> list[dict]:
         value = reading.get("value")
         if not station or not isinstance(value, (int, float)) or value < 0:
             continue
-        stamp = reading.get("dateTime")
+        # `at` is rendered as a `<time datetime=...>` and turned into "3 h ago", so
+        # an unparseable stamp is worse than a missing station: it becomes an
+        # Invalid Date in the browser. Drop the reading rather than publish it.
+        stamp = parse_timestamp(reading.get("dateTime"))
+        if stamp is None:
+            continue
         # A station can expose several flow measures (logged, stage-derived, mean).
         # Keep the freshest reading rather than whichever arrived last.
         existing = out.get(reference)
-        if existing and existing["at"] >= str(stamp):
+        if existing and existing["at"] >= stamp:
             continue
-        out[reference] = {**station, "value": round(float(value), 3), "at": str(stamp)}
+        out[reference] = {**station, "value": round(float(value), 3), "at": stamp}
 
     log.info("  %d live stations", len(out))
     return sorted(out.values(), key=lambda s: s["id"])
@@ -380,8 +416,17 @@ def main() -> int:
     }
 
     live = [] if args.skip_live else fetch_live(http)
+    live_path = out / "live.json"
     if live:
-        sizes["live.json"] = contract.write_json(out / "live.json", live)
+        sizes["live.json"] = contract.write_json(live_path, live)
+    elif live_path.exists():
+        # The live layer is additive, so losing it does not fail the ingest - but
+        # leaving the previous file behind is worse than dropping the layer. The
+        # committed seed ships a live.json, so a failed fetch would otherwise
+        # republish a weeks-old snapshot under a "Live - 15-minute" label while
+        # meta.counts.live said zero. Remove it and let the front end degrade.
+        live_path.unlink()
+        log.warning("removed a stale live.json; this run has no real-time layer")
 
     meta = {
         "contract": contract.CONTRACT_VERSION,

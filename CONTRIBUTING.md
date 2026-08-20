@@ -28,7 +28,7 @@ python3 pipeline/ingest_uk.py --days 30
 ## Before you open a pull request
 
 ```bash
-python3 -m unittest discover -s pipeline/tests   # 40 tests, no network
+python3 -m unittest discover -s pipeline/tests   # 53 tests, no network
 python3 pipeline/validate_data.py                # contract + page-weight budget
 cd web && npm run lint && npm test && npm run build
 ```

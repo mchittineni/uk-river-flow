@@ -16,7 +16,7 @@
     "check:headers": "node scripts/check-headers.mjs"
   },
   "dependencies": {
-    "maplibre-gl": "^5.6.0"
+    "maplibre-gl": "^6.7.0"
   },
   "devDependencies": {
     "@eslint/js": "^9.15.0",
